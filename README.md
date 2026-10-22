@@ -16,7 +16,7 @@ python scrape_season.py --season-type Playoffs
 | `leaguegamelog` (`PlayerOrTeam=P`) | 1 | official box-score minutes per player-game |
 | `gamerotation` | 1 per game | every stint a player was on court (`IN_TIME_REAL` / `OUT_TIME_REAL`, tenths of a second of elapsed game time) |
 
-Rotation responses are cached in `data/<season>/rotations/`, so re-runs only fetch new games.
+Rotation responses are cached in `data/<season>/rotations/` (git-ignored), so re-runs only fetch new games. The output CSVs are committed.
 
 ## Output (`data/<season>/`)
 
