@@ -1,4 +1,4 @@
-"""Pull player minutes and rotation stints for an NBA season from stats.nba.com.
+"""Pull player minutes, rotation stints and shot locations for an NBA season from stats.nba.com.
 
 Every field the endpoints return is kept. Outputs (under data/<season>/):
   games.csv                one row per team-game (leaguegamelog, all columns)
@@ -7,6 +7,9 @@ Every field the endpoints return is kept. Outputs (under data/<season>/):
                            (boxscoretraditionalv3, all player fields + statistics)
   box_teams.csv            one row per team-game per split: total / starters / bench
   stints.csv               one row per player stint (gamerotation, all columns + derived)
+  shots.csv                one row per field goal attempt with court location
+                           (shotchartdetail, all columns + elapsed game time)
+  shot_zone_averages.csv   league FGA/FGM/FG% by shot zone (shotchartdetail)
   player_minutes.csv       one row per rostered player-game: exact box score minutes,
                            starter/DNP status, stint counts and minutes per period
 
@@ -26,7 +29,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
-from nba_api.stats.endpoints import leaguegamelog
+from nba_api.stats.endpoints import leaguegamelog, shotchartdetail
 from nba_api.stats.library.http import NBAStatsHTTP
 
 log = logging.getLogger("nba_scraper")
@@ -114,6 +117,47 @@ def fetch_game_log(season, season_type, player_or_team):
         timeout=60,
     )
     return resp.get_data_frames()[0]
+
+
+def fetch_shots(season, season_type):
+    """Every field goal attempt in the season, league-wide, plus league averages by zone.
+
+    ContextMeasure=FGA includes misses; the default (PTS) returns makes only.
+    """
+    resp = call_with_retries(
+        shotchartdetail.ShotChartDetail,
+        team_id=0,
+        player_id=0,
+        season_nullable=season,
+        season_type_all_star=season_type,
+        context_measure_simple="FGA",
+        headers=HEADERS,
+        timeout=120,
+    )
+    shots, zone_averages = resp.get_data_frames()
+    return shots, zone_averages
+
+
+def build_shots(shots, games):
+    """Add elapsed game time and home/away to the raw shot rows, keeping every column."""
+    df = shots.copy()
+    period_end = df["PERIOD"].map(lambda p: period_bounds(p)[1])
+    df["time_s"] = period_end - 60 * df["MINUTES_REMAINING"] - df["SECONDS_REMAINING"]
+    df["clock"] = [f"{m}:{s:02d}" for m, s in zip(df["MINUTES_REMAINING"], df["SECONDS_REMAINING"])]
+    teams = games[["GAME_ID", "TEAM_ID", "MATCHUP"]].drop_duplicates()
+    teams["home_away"] = teams["MATCHUP"].str.contains("@").map({True: "away", False: "home"})
+    df = df.merge(teams[["GAME_ID", "TEAM_ID", "home_away"]], on=["GAME_ID", "TEAM_ID"], how="left")
+    # The shot chart lags the box score and sometimes drops attempts; flag games whose
+    # shot count doesn't match the team FGA. The whole season is re-fetched each run.
+    attempts = df.groupby(["GAME_ID", "TEAM_ID"]).size()
+    fga = games.set_index(["GAME_ID", "TEAM_ID"])["FGA"]
+    complete = fga.eq(attempts.reindex(fga.index).fillna(0)).groupby("GAME_ID").all()
+    for game_id in complete.index[~complete]:
+        log.warning("Shot chart for %s has %d of %d attempts", game_id,
+                    attempts.get(game_id, pd.Series(dtype=int)).sum(), fga[game_id].sum())
+    df["shots_complete"] = df["GAME_ID"].map(complete)
+    df.columns = [c.lower() for c in df.columns]
+    return df.sort_values(["game_id", "game_event_id"]).reset_index(drop=True)
 
 
 def _get_json(endpoint, parameters):
@@ -389,9 +433,15 @@ def main():
             (cache_dir / "gamerotation" / f"{game_id}.json").unlink(missing_ok=True)
     stints.to_csv(out_dir / f"stints{suffix}.csv", index=False)
 
+    shots, zone_averages = fetch_shots(args.season, args.season_type)
+    # The shot chart includes games in progress; keep the same final games as everything else.
+    shots = build_shots(shots[shots["GAME_ID"].isin(game_ids)], games)
+    shots.to_csv(out_dir / f"shots{suffix}.csv", index=False)
+    zone_averages.to_csv(out_dir / f"shot_zone_averages{suffix}.csv", index=False)
+
     minutes = build_player_minutes(box_players, player_log, games, stints)
     minutes.to_csv(out_dir / f"player_minutes{suffix}.csv", index=False)
-    log.info("Wrote %d player-games and %d stints to %s", len(minutes), len(stints), out_dir)
+    log.info("Wrote %d player-games, %d stints and %d shots to %s", len(minutes), len(stints), len(shots), out_dir)
 
 
 if __name__ == "__main__":
