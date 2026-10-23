@@ -1,2 +1,3 @@
 data/*/rotations/
+data/*/cache/
 __pycache__/

@@ -1,2 +1,2 @@
-nba_api>=1.11
+nba_api>=1.5
 pandas>=2.0
